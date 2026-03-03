@@ -70,6 +70,19 @@ Call MCP tool plaud_list_files with arguments {"limit":10} and show file_id + ti
 Call MCP tool plaud_get_file_data with arguments {"file_id":"<YOUR_FILE_ID>","include_transcript":true,"include_summary":true}.
 ```
 
+Supported `transcript_format` values:
+- `json` (default)
+- `srt`
+- `vtt`
+- `text`
+- `text_timestamped`
+
+Example:
+
+```text
+Call MCP tool plaud_get_file_data with arguments {"file_id":"<YOUR_FILE_ID>","include_transcript":true,"transcript_format":"srt"}.
+```
+
 4. Get audio for one file
 
 Only return `temp_url`:

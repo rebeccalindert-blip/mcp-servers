@@ -510,6 +510,18 @@ const TOOL_LIST_FILES = "plaud_list_files";
 const TOOL_GET_FILE_DATA = "plaud_get_file_data";
 const TOOL_GET_FILE_AUDIO = "plaud_get_file_audio";
 const TOOL_AUTH_BROWSER = "plaud_auth_browser";
+const TRANSCRIPT_FORMAT_JSON = "json";
+const TRANSCRIPT_FORMAT_SRT = "srt";
+const TRANSCRIPT_FORMAT_VTT = "vtt";
+const TRANSCRIPT_FORMAT_TEXT = "text";
+const TRANSCRIPT_FORMAT_TEXT_TIMESTAMPED = "text_timestamped";
+const TRANSCRIPT_FORMAT_SET = new Set([
+  TRANSCRIPT_FORMAT_JSON,
+  TRANSCRIPT_FORMAT_SRT,
+  TRANSCRIPT_FORMAT_VTT,
+  TRANSCRIPT_FORMAT_TEXT,
+  TRANSCRIPT_FORMAT_TEXT_TIMESTAMPED,
+]);
 
 const TOOLS = [
   {
@@ -575,6 +587,19 @@ const TOOLS = [
           default: true,
           description: "Include transcript content.",
         },
+        transcript_format: {
+          type: "string",
+          enum: [
+            TRANSCRIPT_FORMAT_JSON,
+            TRANSCRIPT_FORMAT_SRT,
+            TRANSCRIPT_FORMAT_VTT,
+            TRANSCRIPT_FORMAT_TEXT,
+            TRANSCRIPT_FORMAT_TEXT_TIMESTAMPED,
+          ],
+          default: TRANSCRIPT_FORMAT_JSON,
+          description:
+            "Transcript output format: json/srt/vtt/text/text_timestamped.",
+        },
         include_transcript_segments: {
           type: "boolean",
           default: false,
@@ -593,7 +618,8 @@ const TOOLS = [
         max_transcript_chars: {
           type: "integer",
           minimum: 1,
-          description: "Optional max chars for transcript text.",
+          description:
+            "Optional max chars for transcript text output. Ignored when transcript_format=json.",
         },
         max_summary_chars_per_item: {
           type: "integer",
@@ -1825,16 +1851,126 @@ function formatSpeakerForTranscript(value) {
   return raw || "Speaker 1";
 }
 
-function buildTranscriptTextForSummary(transResult) {
+function normalizeTranscriptFormat(value) {
+  const raw = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!raw) return TRANSCRIPT_FORMAT_JSON;
+  if (TRANSCRIPT_FORMAT_SET.has(raw)) return raw;
+  throw new Error(
+    `Invalid transcript_format: ${value}. Supported values: ${Array.from(TRANSCRIPT_FORMAT_SET).join(", ")}`
+  );
+}
+
+function toNonNegativeInteger(value, fallback = 0) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.round(n);
+}
+
+function formatTimestampClock(value, options = {}) {
+  const includeMilliseconds = toBoolean(options?.includeMilliseconds, true);
+  const millisecondSeparator = String(options?.millisecondSeparator || ".");
+  const ms = toNonNegativeInteger(value, 0);
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const milliseconds = ms % 1000;
+  const hh = String(hours).padStart(2, "0");
+  const mm = String(minutes).padStart(2, "0");
+  const ss = String(seconds).padStart(2, "0");
+  if (!includeMilliseconds) {
+    return `${hh}:${mm}:${ss}`;
+  }
+  const mmm = String(milliseconds).padStart(3, "0");
+  return `${hh}:${mm}:${ss}${millisecondSeparator}${mmm}`;
+}
+
+function buildTranscriptCues(transResult) {
   const list = Array.isArray(transResult) ? transResult : [];
-  const lines = [];
+  const cues = [];
+  let cursorMs = 0;
+
   for (const segment of list) {
     const content = String(segment?.content || "").trim();
     if (!content) continue;
-    const speaker = formatSpeakerForTranscript(segment?.speaker);
-    lines.push(`${speaker}: ${content}`);
+
+    let startMs = toNonNegativeInteger(segment?.start_time, cursorMs);
+    if (startMs < cursorMs) startMs = cursorMs;
+    let endMs = toNonNegativeInteger(segment?.end_time, startMs);
+    if (endMs <= startMs) endMs = startMs + 2000;
+
+    cues.push({
+      speaker: formatSpeakerForTranscript(segment?.speaker),
+      content,
+      startMs,
+      endMs,
+    });
+    cursorMs = endMs;
   }
-  return lines.join("\n").trim();
+
+  return cues;
+}
+
+function renderTranscriptByFormat(transResult, transcriptFormat) {
+  const format = normalizeTranscriptFormat(transcriptFormat);
+  const list = Array.isArray(transResult) ? transResult : [];
+  if (format === TRANSCRIPT_FORMAT_JSON) {
+    return JSON.stringify(list, null, 2);
+  }
+
+  const cues = buildTranscriptCues(list);
+
+  if (format === TRANSCRIPT_FORMAT_TEXT) {
+    return cues.map((cue) => cue.content).join("\n\n").trim();
+  }
+
+  if (format === TRANSCRIPT_FORMAT_TEXT_TIMESTAMPED) {
+    return cues
+      .map((cue) => {
+        const ts = formatTimestampClock(cue.startMs, { includeMilliseconds: false });
+        return `[${ts}] ${cue.speaker}: ${cue.content}`;
+      })
+      .join("\n")
+      .trim();
+  }
+
+  if (format === TRANSCRIPT_FORMAT_SRT) {
+    return cues
+      .map((cue, index) => {
+        const startTs = formatTimestampClock(cue.startMs, {
+          includeMilliseconds: true,
+          millisecondSeparator: ",",
+        });
+        const endTs = formatTimestampClock(cue.endMs, {
+          includeMilliseconds: true,
+          millisecondSeparator: ",",
+        });
+        return `${index + 1}\n${startTs} --> ${endTs}\n${cue.speaker}: ${cue.content}`;
+      })
+      .join("\n\n")
+      .trim();
+  }
+
+  if (format === TRANSCRIPT_FORMAT_VTT) {
+    const body = cues
+      .map((cue, index) => {
+        const startTs = formatTimestampClock(cue.startMs, {
+          includeMilliseconds: true,
+          millisecondSeparator: ".",
+        });
+        const endTs = formatTimestampClock(cue.endMs, {
+          includeMilliseconds: true,
+          millisecondSeparator: ".",
+        });
+        return `${index + 1}\n${startTs} --> ${endTs}\n${cue.speaker}: ${cue.content}`;
+      })
+      .join("\n\n");
+    return body ? `WEBVTT\n\n${body}` : "WEBVTT";
+  }
+
+  return "";
 }
 
 function shouldTryAnotherApiOrigin(error) {
@@ -2596,6 +2732,9 @@ async function handleGetFileData(args) {
   if (!fileId) throw new Error("Missing file_id");
 
   const includeTranscript = toBoolean(args?.include_transcript, true);
+  const transcriptFormat = includeTranscript
+    ? normalizeTranscriptFormat(args?.transcript_format)
+    : TRANSCRIPT_FORMAT_JSON;
   const includeTranscriptSegments = toBoolean(args?.include_transcript_segments, false);
   const includeSummary = toBoolean(args?.include_summary, true);
   const includeDetailRaw = toBoolean(args?.include_detail_raw, false);
@@ -2633,13 +2772,21 @@ async function handleGetFileData(args) {
 
   if (includeTranscript) {
     const transcript = await loadTranscriptFromFileDetail(detailData);
-    const transcriptTextFull = buildTranscriptTextForSummary(transcript.transResult);
-    const truncatedTranscript = truncateText(transcriptTextFull, maxTranscriptChars);
+    const transcriptTextFull = renderTranscriptByFormat(transcript.transResult, transcriptFormat);
+    const shouldTruncateTranscript = transcriptFormat !== TRANSCRIPT_FORMAT_JSON;
+    const truncatedTranscript = shouldTruncateTranscript
+      ? truncateText(transcriptTextFull, maxTranscriptChars)
+      : {
+          text: transcriptTextFull,
+          truncated: false,
+          originalLength: transcriptTextFull.length,
+        };
 
     result.transcript = {
       source: transcript.source,
       transcript_url: transcript.transcriptUrl,
       segment_count: transcript.transResult.length,
+      format: transcriptFormat,
       text: truncatedTranscript.text,
       text_truncated: truncatedTranscript.truncated,
       text_original_length: truncatedTranscript.originalLength,
