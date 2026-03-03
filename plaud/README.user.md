@@ -1,11 +1,11 @@
 # PLAUD MCP User Guide
 
 This guide is for end users.  
-It explains how to use this MCP in Claude Code to access PLAUD files, transcripts, summaries, and audio.
+It explains how to use this MCP in Claude Code or Codex to access PLAUD files, transcripts, summaries, and audio.
 
 ## What You Get
 
-After setup, Claude can use these MCP tools:
+After setup, Claude Code or Codex can use these MCP tools:
 
 - `plaud_auth_browser`
   - Opens PLAUD in your browser and tries to capture your login token automatically (macOS/Windows).
@@ -19,7 +19,7 @@ After setup, Claude can use these MCP tools:
 ## Prerequisites
 
 - Node.js 18+
-- Claude Code CLI (`claude`) installed
+- Claude Code CLI (`claude`) or Codex CLI (`codex`) installed
 - The distributed file: `plaud-mcp-server.standalone.js`
 
 ## Install in Claude Code
@@ -36,15 +36,36 @@ Verify:
 claude mcp get plaud-local
 ```
 
+## Install in Codex
+
+Replace the path below with your local path:
+
+```bash
+codex mcp add plaud-local -- node /absolute/path/plaud-mcp-server.standalone.js
+```
+
+Verify:
+
+```bash
+codex mcp list
+codex mcp get plaud-local
+```
+
 ## Start Using It
 
-Start Claude Code:
+Start one client:
 
 ```bash
 claude
 ```
 
-Then in your Claude conversation, use these prompts:
+or:
+
+```bash
+codex
+```
+
+Then in your Claude/Codex conversation, use these prompts:
 
 1. Authenticate (recommended first)
 
@@ -112,10 +133,24 @@ claude mcp remove plaud-local
 claude mcp add --scope user -e PLAUD_TOKEN=YOUR_TOKEN plaud-local -- node /absolute/path/plaud-mcp-server.standalone.js
 ```
 
+Codex equivalent:
+
+```bash
+codex mcp remove plaud-local
+codex mcp add --env PLAUD_TOKEN=YOUR_TOKEN plaud-local -- node /absolute/path/plaud-mcp-server.standalone.js
+```
+
 If your region uses a non-default API domain, you can also add:
 
 ```bash
 claude mcp add --scope user -e PLAUD_TOKEN=YOUR_TOKEN -e PLAUD_API_ORIGINS=https://api.plaud.ai,https://api-eu.plaud.ai plaud-local -- node /absolute/path/plaud-mcp-server.standalone.js
+```
+
+Codex equivalent:
+
+```bash
+codex mcp remove plaud-local
+codex mcp add --env PLAUD_TOKEN=YOUR_TOKEN --env PLAUD_API_ORIGINS=https://api.plaud.ai,https://api-eu.plaud.ai plaud-local -- node /absolute/path/plaud-mcp-server.standalone.js
 ```
 
 If you want browser auth but custom save path, call:
@@ -130,7 +165,8 @@ This also writes `/absolute/path/plaud.token.api-origins.json`, so MCP can reuse
 
 1. `plaud_auth_browser` tool not found
 - Run `claude mcp get plaud-local`
-- Restart your Claude session
+- Or run `codex mcp get plaud-local`
+- Restart your client session
 
 2. `plaud_auth_browser` cannot capture token
 - Make sure you are logged in at `https://web.plaud.ai/file/` or `https://app.plaud.ai/file/`
