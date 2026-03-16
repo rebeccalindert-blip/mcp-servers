@@ -1,26 +1,27 @@
 # Plaud → Obsidian Transcript Sync
 
-Automatically syncs your [Plaud](https://plaud.ai) recording transcripts and AI summaries to your Obsidian vault as markdown notes.
+Automatically syncs Plaud recording transcripts from Google Drive to your Obsidian vault as properly formatted markdown notes.
 
-## What it does
+## How it works
 
-- Fetches all your recordings from Plaud's API
-- Downloads transcripts (with speaker labels and timestamps) and AI summaries
-- Saves each recording as a clean Obsidian-compatible markdown note with YAML frontmatter
-- Tracks what's already been synced so it only processes new recordings
-- Can run on a schedule via macOS launchd (every hour)
+```
+Plaud app → Zapier → Google Drive → this script → Obsidian vault
+```
+
+1. Plaud records and transcribes your audio
+2. Zapier exports the transcript as a markdown file to Google Drive
+3. Google Drive for Desktop syncs it locally
+4. This script picks up new files, adds YAML frontmatter, and copies them to your Obsidian vault
 
 ## Output format
 
-Each note is saved as `YYYY-MM-DD Title.md`:
+Each note gets Obsidian-compatible YAML frontmatter:
 
 ```markdown
 ---
-title: Meeting with Client
+title: "Meeting with Client"
 date: 2026-03-16
 source: plaud
-duration: 45:23
-plaud_id: abc123
 tags:
   - transcript
   - plaud
@@ -30,60 +31,52 @@ tags:
 AI-generated summary of the recording...
 
 ## Transcript
-**Speaker 1** `00:00`
-Hello, thanks for joining...
+**Speaker 1** Hello, thanks for joining...
 
-**Speaker 2** `00:15`
-Thanks for having me...
+**Speaker 2** Thanks for having me...
 ```
 
 ## Setup
 
-### 1. Install dependencies
+### Prerequisites
 
-```bash
-cd /path/to/mcp-servers
-pip install -r requirements.txt
-```
+- Python 3.10+
+- [Google Drive for Desktop](https://www.google.com/drive/download/) installed and syncing
+- Zapier automation exporting Plaud transcripts as markdown to Google Drive
 
-### 2. Get your Plaud API token
+### Paths (pre-configured)
 
-1. Go to [web.plaud.ai](https://web.plaud.ai) and sign in
-2. Open browser DevTools (Cmd+Option+I) → **Network** tab
-3. Click on any request going to `api.plaud.ai`
-4. Copy the **Authorization** header value (without the `Bearer ` prefix)
+| What | Path |
+|------|------|
+| Google Drive source | `/Users/rebeccalindert/Library/CloudStorage/GoogleDrive-bec@lindertco.com.au/My Drive/PLAUD Recordings` |
+| Obsidian vault dest | `/Users/rebeccalindert/Documents/Second Brain/Transcripts` |
 
-### 3. Configure
+To change these, edit the `SOURCE_DIR` and `OBSIDIAN_DIR` variables at the top of `sync_plaud_to_obsidian.py`.
 
-Copy the example env file and add your token:
+## Usage
 
-```bash
-cp .env.example .env
-```
-
-Edit `.env`:
-
-```
-PLAUD_TOKEN=your_token_here
-OBSIDIAN_VAULT_PATH=/Users/rebeccalindert/Documents/Second Brain/Transcripts
-```
-
-### 4. Run manually
+### One-time sync
 
 ```bash
 python sync_plaud_to_obsidian.py
 ```
 
-Options:
-- `--all` — Re-sync all transcripts (ignores sync state)
-- `--limit 100` — Fetch more recordings (default: 50)
-
-### 5. Run automatically (every hour)
-
-Install the launchd service:
+### Re-sync everything
 
 ```bash
-# Edit the plist if your paths differ, then:
+python sync_plaud_to_obsidian.py --all
+```
+
+### Watch mode (continuous)
+
+```bash
+python sync_plaud_to_obsidian.py --watch
+python sync_plaud_to_obsidian.py --watch --interval 30  # check every 30s
+```
+
+### Auto-run every hour (launchd)
+
+```bash
 cp com.plaud.obsidian-sync.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.plaud.obsidian-sync.plist
 ```
@@ -100,6 +93,6 @@ Check logs:
 tail -f /tmp/plaud-obsidian-sync.log
 ```
 
-## Token refresh
+## No dependencies
 
-Plaud tokens may expire. If you see authentication errors, repeat step 2 to get a fresh token and update your `.env` file.
+Uses only the Python standard library — no `pip install` needed.

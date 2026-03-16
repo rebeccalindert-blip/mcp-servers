@@ -1,258 +1,259 @@
 #!/usr/bin/env python3
 """
-Sync Plaud transcripts to Obsidian vault as markdown notes.
+Sync Plaud transcripts from Google Drive to Obsidian vault.
 
-Fetches recordings from your Plaud account, downloads their transcripts
-and summaries, and saves them as Obsidian-compatible markdown files
-in your iCloud-synced vault.
+Watches a Google Drive folder (synced locally via Drive for Desktop) for
+markdown files exported by Plaud via Zapier. Adds YAML frontmatter and
+copies them to your Obsidian vault's Transcripts folder.
 
 Usage:
-    python sync_plaud_to_obsidian.py          # Sync new transcripts
-    python sync_plaud_to_obsidian.py --all    # Re-sync all transcripts
+    python sync_plaud_to_obsidian.py              # One-time sync
+    python sync_plaud_to_obsidian.py --watch      # Watch for new files continuously
+    python sync_plaud_to_obsidian.py --all        # Re-sync all files
 """
 
 import argparse
+import hashlib
 import json
-import os
 import re
+import shutil
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
-PLAUD_TOKEN = os.getenv("PLAUD_TOKEN")
-OBSIDIAN_VAULT_PATH = os.getenv(
-    "OBSIDIAN_VAULT_PATH",
-    "/Users/rebeccalindert/Documents/Second Brain/Transcripts",
+SOURCE_DIR = Path(
+    "/Users/rebeccalindert/Library/CloudStorage/"
+    "GoogleDrive-bec@lindertco.com.au/My Drive/PLAUD Recordings"
+)
+OBSIDIAN_DIR = Path(
+    "/Users/rebeccalindert/Documents/Second Brain/Transcripts"
 )
 SYNC_STATE_FILE = Path(__file__).parent / ".sync_state.json"
 
 
-def get_client():
-    """Initialize and return a PlaudClient."""
-    if not PLAUD_TOKEN:
-        print("Error: PLAUD_TOKEN not set.")
-        print("1. Go to web.plaud.ai and sign in")
-        print("2. Open DevTools → Network tab")
-        print("3. Find any request to api.plaud.ai")
-        print("4. Copy the Authorization header value (without 'Bearer ' prefix)")
-        print("5. Set it in your .env file as PLAUD_TOKEN=<token>")
-        sys.exit(1)
-
-    from plaud import PlaudClient
-
-    return PlaudClient(token=PLAUD_TOKEN)
-
-
 def load_sync_state():
-    """Load the set of already-synced recording IDs."""
+    """Load dict of already-synced files: {filename: content_hash}."""
     if SYNC_STATE_FILE.exists():
-        data = json.loads(SYNC_STATE_FILE.read_text())
-        return set(data.get("synced_ids", []))
-    return set()
+        return json.loads(SYNC_STATE_FILE.read_text())
+    return {}
 
 
-def save_sync_state(synced_ids):
-    """Persist the set of synced recording IDs."""
-    SYNC_STATE_FILE.write_text(
-        json.dumps({"synced_ids": sorted(synced_ids)}, indent=2)
+def save_sync_state(state):
+    """Persist sync state."""
+    SYNC_STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def content_hash(text):
+    """Return a short hash of file content for change detection."""
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def has_frontmatter(text):
+    """Check if the markdown already has YAML frontmatter."""
+    return text.strip().startswith("---")
+
+
+def extract_title(filepath, text):
+    """Extract a title from the file content or filename."""
+    # Try first heading
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("# "):
+            return line.lstrip("# ").strip()
+
+    # Fall back to filename without extension
+    return filepath.stem
+
+
+def extract_date(filepath):
+    """Try to extract a date from the filename, fall back to file mtime."""
+    # Common patterns: "2026-03-16 Meeting", "20260316_Meeting"
+    match = re.match(r"(\d{4}[-_]?\d{2}[-_]?\d{2})", filepath.stem)
+    if match:
+        date_str = match.group(1).replace("_", "-")
+        # Ensure dashes
+        if "-" not in date_str:
+            date_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+        return date_str
+
+    # Fall back to file modification time
+    mtime = filepath.stat().st_mtime
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def extract_summary_and_transcript(text):
+    """Split content into summary and transcript sections if identifiable."""
+    # Remove existing heading if present (we'll restructure)
+    lines = text.strip().splitlines()
+
+    # Skip a leading title heading
+    if lines and lines[0].strip().startswith("# "):
+        lines = lines[1:]
+
+    content = "\n".join(lines).strip()
+
+    # Check if it already has ## Summary / ## Transcript sections
+    if "## Summary" in content and "## Transcript" in content:
+        return content
+
+    # Check if there's a clear summary block (often at the top, before transcript)
+    # Plaud exports typically have summary then transcript with speaker labels
+    # Look for speaker patterns like "Speaker 1:", "**Speaker 1**", "[Speaker 1]"
+    speaker_pattern = re.compile(
+        r"^(\*\*[^*]+\*\*|Speaker \d+|\[[^\]]+\])\s*[:\-]?\s*", re.MULTILINE
     )
+    speaker_matches = list(speaker_pattern.finditer(content))
+
+    if speaker_matches:
+        # Everything before first speaker label is likely the summary
+        first_speaker_pos = speaker_matches[0].start()
+        summary_text = content[:first_speaker_pos].strip()
+        transcript_text = content[first_speaker_pos:].strip()
+
+        parts = []
+        parts.append("## Summary")
+        parts.append("")
+        parts.append(summary_text if summary_text else "*No summary available.*")
+        parts.append("")
+        parts.append("## Transcript")
+        parts.append("")
+        parts.append(transcript_text)
+        return "\n".join(parts)
+
+    # No clear structure — put everything under Transcript
+    parts = []
+    parts.append("## Summary")
+    parts.append("")
+    parts.append("*No summary available.*")
+    parts.append("")
+    parts.append("## Transcript")
+    parts.append("")
+    parts.append(content)
+    return "\n".join(parts)
+
+
+def process_file(filepath):
+    """Read a Plaud markdown file and return Obsidian-formatted content."""
+    text = filepath.read_text(encoding="utf-8")
+
+    # If it already has frontmatter, just return as-is
+    if has_frontmatter(text):
+        return text
+
+    title = extract_title(filepath, text)
+    date = extract_date(filepath)
+    body = extract_summary_and_transcript(text)
+
+    frontmatter = f"""---
+title: "{title}"
+date: {date}
+source: plaud
+tags:
+  - transcript
+  - plaud
+---"""
+
+    return f"{frontmatter}\n\n{body}\n"
 
 
 def sanitize_filename(name):
     """Remove characters that are problematic in filenames."""
     name = re.sub(r'[<>:"/\\|?*]', "", name)
     name = re.sub(r"\s+", " ", name).strip()
-    return name[:200]  # cap length
+    return name[:200]
 
 
-def format_timestamp(ms):
-    """Convert milliseconds to HH:MM:SS format."""
-    total_seconds = int(ms / 1000)
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    seconds = total_seconds % 60
-    if hours > 0:
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-    return f"{minutes:02d}:{seconds:02d}"
+def sync_once(source_dir, obsidian_dir, state, force_all=False):
+    """Scan source dir and sync new/changed files to Obsidian."""
+    if not source_dir.exists():
+        print(f"Error: Source folder not found: {source_dir}")
+        print("Make sure Google Drive for Desktop is running and the folder exists.")
+        sys.exit(1)
 
+    obsidian_dir.mkdir(parents=True, exist_ok=True)
 
-def format_date(recording):
-    """Extract a date string from the recording's created_at field."""
-    created = getattr(recording, "created_at", None)
-    if created:
-        if isinstance(created, (int, float)):
-            dt = datetime.fromtimestamp(created / 1000, tz=timezone.utc)
-        elif isinstance(created, str):
-            try:
-                dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
-            except ValueError:
-                dt = datetime.now(tz=timezone.utc)
-        elif isinstance(created, datetime):
-            dt = created
-        else:
-            dt = datetime.now(tz=timezone.utc)
-    else:
-        dt = datetime.now(tz=timezone.utc)
-    return dt.strftime("%Y-%m-%d"), dt.strftime("%Y-%m-%d %H:%M")
+    md_files = sorted(source_dir.glob("*.md"))
+    if not md_files:
+        print("No markdown files found in source folder.")
+        return 0
 
+    new_count = 0
+    for filepath in md_files:
+        file_key = filepath.name
+        file_hash = content_hash(filepath.read_text(encoding="utf-8"))
 
-def build_markdown(recording, transcript, summary):
-    """Build an Obsidian-compatible markdown note from Plaud data."""
-    date_short, date_long = format_date(recording)
-    title = getattr(recording, "filename", "Untitled Recording") or "Untitled Recording"
-    title = title.replace(".wav", "").replace(".mp3", "").strip()
-    duration = getattr(recording, "duration_display", "")
+        # Skip if already synced and unchanged
+        if not force_all and state.get(file_key) == file_hash:
+            continue
 
-    # --- Frontmatter ---
-    lines = [
-        "---",
-        f"title: {title}",
-        f"date: {date_short}",
-        "source: plaud",
-        f"duration: {duration}",
-        f"plaud_id: {recording.id}",
-        "tags:",
-        "  - transcript",
-        "  - plaud",
-        "---",
-        "",
-    ]
+        print(f"  Processing: {filepath.name}")
 
-    # --- Summary ---
-    lines.append("## Summary")
-    lines.append("")
-    if summary:
-        content = getattr(summary, "content", None) or str(summary)
-        lines.append(content.strip())
-    else:
-        lines.append("*No summary available.*")
-    lines.append("")
+        try:
+            formatted = process_file(filepath)
+        except Exception as e:
+            print(f"  Error processing {filepath.name}: {e}")
+            continue
 
-    # --- Transcript ---
-    lines.append("## Transcript")
-    lines.append("")
-    if transcript and hasattr(transcript, "segments") and transcript.segments:
-        current_speaker = None
-        for seg in transcript.segments:
-            speaker = getattr(seg, "speaker", "Unknown")
-            text = getattr(seg, "text", "").strip()
-            timestamp = format_timestamp(getattr(seg, "start_time_ms", 0))
+        # Save to Obsidian vault
+        dest = obsidian_dir / filepath.name
+        dest.write_text(formatted, encoding="utf-8")
 
-            if speaker != current_speaker:
-                current_speaker = speaker
-                lines.append(f"**{speaker}** `{timestamp}`")
-                lines.append(text)
-                lines.append("")
-            else:
-                lines.append(f"`{timestamp}` {text}")
-                lines.append("")
-    else:
-        lines.append("*No transcript available.*")
-    lines.append("")
+        state[file_key] = file_hash
+        new_count += 1
+        print(f"  → Saved: {dest.name}")
 
-    # --- Metadata footer ---
-    lines.append("---")
-    lines.append(f"*Synced from Plaud on {datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*")
-
-    return "\n".join(lines)
-
-
-def sync_recording(client, recording, vault_path):
-    """Fetch transcript + summary for a recording and save as markdown."""
-    rec_id = recording.id
-    title = getattr(recording, "filename", "Untitled") or "Untitled"
-    title = title.replace(".wav", "").replace(".mp3", "").strip()
-    date_short, _ = format_date(recording)
-
-    # Fetch transcript and summary
-    transcript = None
-    summary = None
-
-    try:
-        transcript = client.transcriptions.get(rec_id)
-    except Exception as e:
-        print(f"  Warning: Could not fetch transcript for '{title}': {e}")
-
-    try:
-        summary = client.transcriptions.get_summary(rec_id)
-    except Exception as e:
-        print(f"  Warning: Could not fetch summary for '{title}': {e}")
-
-    if not transcript and not summary:
-        print(f"  Skipping '{title}' — no transcript or summary available")
-        return False
-
-    # Build markdown
-    md_content = build_markdown(recording, transcript, summary)
-
-    # Save to vault
-    safe_title = sanitize_filename(title)
-    filename = f"{date_short} {safe_title}.md"
-    filepath = vault_path / filename
-
-    filepath.write_text(md_content, encoding="utf-8")
-    print(f"  Saved: {filename}")
-    return True
+    return new_count
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sync Plaud transcripts to Obsidian")
+    parser = argparse.ArgumentParser(
+        description="Sync Plaud transcripts from Google Drive to Obsidian"
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Watch for new files continuously (checks every 60s)",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        help="Watch interval in seconds (default: 60)",
+    )
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Re-sync all transcripts (ignore sync state)",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=50,
-        help="Max number of recordings to fetch (default: 50)",
+        help="Re-sync all files (ignore sync state)",
     )
     args = parser.parse_args()
 
-    # Ensure output directory exists
-    vault_path = Path(OBSIDIAN_VAULT_PATH)
-    vault_path.mkdir(parents=True, exist_ok=True)
-
-    print(f"Obsidian vault path: {vault_path}")
+    print(f"Source:      {SOURCE_DIR}")
+    print(f"Destination: {OBSIDIAN_DIR}")
     print()
 
-    # Initialize client
-    client = get_client()
+    state = {} if args.all else load_sync_state()
 
-    # Load sync state
-    synced_ids = set() if args.all else load_sync_state()
-
-    # Fetch recordings
-    print("Fetching recordings from Plaud...")
-    recordings = client.recordings.list(limit=args.limit)
-    print(f"Found {len(recordings)} recording(s)")
-    print()
-
-    new_count = 0
-    skip_count = 0
-
-    for rec in recordings:
-        if rec.id in synced_ids:
-            skip_count += 1
-            continue
-
-        title = getattr(rec, "filename", rec.id) or rec.id
-        print(f"Processing: {title}")
-
-        if sync_recording(client, rec, vault_path):
-            synced_ids.add(rec.id)
-            new_count += 1
-
-    # Save sync state
-    save_sync_state(synced_ids)
-
-    print()
-    print(f"Done! Synced {new_count} new transcript(s), skipped {skip_count} already synced.")
+    if args.watch:
+        print(f"Watching for new files every {args.interval}s (Ctrl+C to stop)...")
+        print()
+        try:
+            while True:
+                new_count = sync_once(SOURCE_DIR, OBSIDIAN_DIR, state, force_all=False)
+                if new_count > 0:
+                    save_sync_state(state)
+                    print(f"  Synced {new_count} file(s)")
+                    print()
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            print("\nStopped watching.")
+            save_sync_state(state)
+    else:
+        new_count = sync_once(SOURCE_DIR, OBSIDIAN_DIR, state, force_all=args.all)
+        save_sync_state(state)
+        total = len(state)
+        print()
+        print(f"Done! Synced {new_count} new/changed file(s). {total} total tracked.")
 
 
 if __name__ == "__main__":
