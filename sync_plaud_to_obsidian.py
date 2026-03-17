@@ -173,13 +173,13 @@ def sync_once(source_dir, obsidian_dir, state, force_all=False):
 
     obsidian_dir.mkdir(parents=True, exist_ok=True)
 
-    md_files = sorted(source_dir.glob("*.md"))
-    if not md_files:
-        print("No markdown files found in source folder.")
+    txt_files = sorted(source_dir.glob("*.txt"))
+    if not txt_files:
+        print("No text files found in source folder.")
         return 0
 
     new_count = 0
-    for filepath in md_files:
+    for filepath in txt_files:
         file_key = filepath.name
         file_hash = content_hash(filepath.read_text(encoding="utf-8"))
 
@@ -195,8 +195,8 @@ def sync_once(source_dir, obsidian_dir, state, force_all=False):
             print(f"  Error processing {filepath.name}: {e}")
             continue
 
-        # Save to Obsidian vault
-        dest = obsidian_dir / filepath.name
+        # Save to Obsidian vault as .md
+        dest = obsidian_dir / (filepath.stem + ".md")
         dest.write_text(formatted, encoding="utf-8")
 
         state[file_key] = file_hash
