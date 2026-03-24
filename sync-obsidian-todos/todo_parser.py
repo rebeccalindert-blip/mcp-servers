@@ -12,6 +12,7 @@ class TodoItem:
     done: bool
     source_file: str
     line_number: int
+    source_dir: Optional[str] = None
     heading: Optional[str] = None
 
 
@@ -42,6 +43,7 @@ def parse_todos_from_file(filepath: Path) -> list[TodoItem]:
                 done=done,
                 source_file=filepath.name,
                 line_number=i,
+                source_dir=str(filepath.parent),
                 heading=current_heading,
             ))
 
@@ -82,3 +84,40 @@ def collect_todos(diary_path: Path, today_only: bool = False) -> list[TodoItem]:
 def get_incomplete_todos(diary_path: Path, today_only: bool = False) -> list[TodoItem]:
     """Return only incomplete todos."""
     return [t for t in collect_todos(diary_path, today_only) if not t.done]
+
+
+def toggle_todo(todo: TodoItem) -> bool:
+    """Toggle a todo item's done state in its source markdown file.
+
+    Reads the file, flips `- [ ]` to `- [x]` (or vice versa) on the
+    exact line, and writes the file back. Returns True on success.
+    """
+    if not todo.source_dir:
+        return False
+
+    filepath = Path(todo.source_dir) / todo.source_file
+
+    try:
+        lines = filepath.read_text(encoding="utf-8").splitlines(keepends=True)
+    except (OSError, UnicodeDecodeError):
+        return False
+
+    idx = todo.line_number - 1  # 0-based index
+    if idx < 0 or idx >= len(lines):
+        return False
+
+    line = lines[idx]
+
+    if todo.done:
+        # Mark as incomplete: [x] or [X] → [ ]
+        new_line = re.sub(r"\[([xX])\]", "[ ]", line, count=1)
+    else:
+        # Mark as done: [ ] → [x]
+        new_line = re.sub(r"\[ \]", "[x]", line, count=1)
+
+    if new_line == line:
+        return False  # Nothing changed — line didn't match
+
+    lines[idx] = new_line
+    filepath.write_text("".join(lines), encoding="utf-8")
+    return True

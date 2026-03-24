@@ -22,7 +22,8 @@ from todo_parser import TodoItem
 class StickyWidget:
     """A floating sticky-note style window showing todo items."""
 
-    def __init__(self):
+    def __init__(self, on_toggle=None):
+        self.on_toggle = on_toggle  # callback(todo: TodoItem) when checkbox clicked
         self.root = tk.Tk()
         self.root.title(WIDGET_TITLE)
         self.root.overrideredirect(True)  # Remove window decorations
@@ -200,25 +201,28 @@ class StickyWidget:
             bg=WIDGET_BG,
             fg=fg,
             font=(WIDGET_FONT_FAMILY, WIDGET_FONT_SIZE + 2),
+            cursor="hand2",
         )
         cb_label.pack(side=tk.LEFT)
 
-        text = todo.text
-        if todo.done:
-            # Strikethrough effect not native in tk, use color to indicate
-            pass
-
         text_label = tk.Label(
             row,
-            text=text,
+            text=todo.text,
             bg=WIDGET_BG,
             fg=fg,
             font=(WIDGET_FONT_FAMILY, WIDGET_FONT_SIZE),
             anchor="w",
             wraplength=WIDGET_WIDTH - 60,
             justify=tk.LEFT,
+            cursor="hand2",
         )
         text_label.pack(side=tk.LEFT, padx=4)
+
+        # Click checkbox or text to toggle
+        if self.on_toggle:
+            toggle_cmd = lambda e, t=todo: self.on_toggle(t)
+            cb_label.bind("<Button-1>", toggle_cmd)
+            text_label.bind("<Button-1>", toggle_cmd)
 
         # Source file tooltip
         source = tk.Label(

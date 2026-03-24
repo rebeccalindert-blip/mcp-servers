@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from config import DIARY_FOLDER, DIARY_PATH, VAULT_PATH
-from todo_parser import collect_todos
+from todo_parser import TodoItem, collect_todos, toggle_todo
 from watcher import DiaryWatcher
 from widget import StickyWidget
 
@@ -26,9 +26,10 @@ class ObsidianTodoApp:
     def __init__(self, diary_path: Path, today_only: bool = False):
         self.diary_path = diary_path
         self.today_only = today_only
-        self.widget = StickyWidget()
+        self.widget = StickyWidget(on_toggle=self._on_toggle)
         self._debounce_timer = None
         self._lock = threading.Lock()
+        self._ignore_next_change = False
 
     def refresh(self):
         """Reload todos from disk and update the widget."""
@@ -37,11 +38,25 @@ class ObsidianTodoApp:
         self.widget.update_todos(todos)
         self.widget.set_status(f"Last updated: {now}  •  Watching {self.diary_path.name}/")
 
+    def _on_toggle(self, todo: TodoItem):
+        """Called when a checkbox is clicked in the widget.
+
+        Writes the change back to the markdown file, then refreshes.
+        """
+        self._ignore_next_change = True
+        if toggle_todo(todo):
+            self.refresh()
+
     def _on_file_change(self):
         """Called by the file watcher (from a background thread).
 
         Debounces rapid changes and schedules UI update on the main thread.
         """
+        # Skip refresh if we just wrote the file ourselves via toggle
+        if self._ignore_next_change:
+            self._ignore_next_change = False
+            return
+
         with self._lock:
             if self._debounce_timer is not None:
                 self.widget.root.after_cancel(self._debounce_timer)
